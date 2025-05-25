@@ -385,8 +385,8 @@ namespace ngbem
       // return kern;
       return Vec<1,decltype(kern)> (kern);
     }
-
-    Array<KernelTerm> terms = { KernelTerm{1.0, 0, 0, 0}, };    
+    double GetKappa() const { return kappa; }
+    Array<KernelTerm> terms = { KernelTerm{1.0, 0, 0, 0}, };
   };
 
 
@@ -541,4 +541,3 @@ namespace ngbem
 
 
 #endif
-

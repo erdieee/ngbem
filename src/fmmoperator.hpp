@@ -43,6 +43,44 @@ namespace ngbem
   }
 
 
+  inline std::tuple<Vec<3>, double, Vec<3>, double> GetMidAndRadius(const Array<Vec<3>>& xpts, const Array<Vec<3>>& ypts)
+  {
+    Vec<3> xmax(-1e99, -1e99, -1e99);
+    Vec<3> xmin(1e99, 1e99, 1e99);
+    for (auto xi : xpts)
+      {
+        for (int j = 0; j < 3; j++)
+          {
+            xmin(j) = min(xmin(j), xi(j));
+            xmax(j) = max(xmax(j), xi(j));
+          }
+      }
+
+    Vec<3> cx = 0.5*(xmin+xmax);
+    double rx = 0;
+    for (int j = 0; j < 3; j++)
+      rx = max(rx, xmax(j)-xmin(j));
+
+    Vec<3> ymax(-1e99, -1e99, -1e99);
+    Vec<3> ymin(1e99, 1e99, 1e99);
+    for (auto yi : ypts)
+      {
+        for (int j = 0; j < 3; j++)
+          {
+            ymin(j) = min(ymin(j), yi(j));
+            ymax(j) = max(ymax(j), yi(j));
+          }
+      }
+
+    Vec<3> cy = 0.5*(ymin+ymax);
+    double ry = 0;
+    for (int j = 0; j < 3; j++)
+      ry = max(ry, ymax(j)-ymin(j));
+
+    return std::make_tuple(cx, rx, cy, ry);
+  }
+
+
   template <typename TSCAL>
   class Base_FMM_Operator : public BaseMatrix
   {
@@ -81,13 +119,38 @@ namespace ngbem
       kernel(_kernel)
     { }
 
+    void MultTrans(const BaseVector & x, BaseVector & y) const override
+    {
+        auto fx = x.FV<typename KERNEL::value_type>();
+        auto fy = y.FV<typename KERNEL::value_type>();
+
+        fy = 0;
+        if constexpr (std::is_same<KERNEL, class LaplaceDLKernel<3>>())
+        {
+            // This is really slow, but works:
+            for (size_t ix = 0; ix < xpts.Size(); ix++)
+              for (size_t iy = 0; iy < ypts.Size(); iy++)
+              {
+                  double norm = L2Norm(xpts[ix]-ypts[iy]);
+                  if (norm > 0)
+                    {
+                      double nxy = InnerProduct(ynv[iy], xpts[ix]-ypts[iy]);
+                      auto kern = nxy / (4 * M_PI * norm*norm*norm);
+                      fy(iy) += kern * fx(ix);
+                    }
+              }
+        }
+        else
+          throw Exception("fmm not available");
+    };
+
     void Mult(const BaseVector & x, BaseVector & y) const override
     {
       static Timer tall("ngbem fmm apply"); RegionTimer reg(tall);
       
       auto fx = x.FV<typename KERNEL::value_type>();
       auto fy = y.FV<typename KERNEL::value_type>();
-      
+
       fy = 0;
       if constexpr (std::is_same<KERNEL, class LaplaceSLKernel<3>>())
         {
@@ -95,6 +158,40 @@ namespace ngbem
             for (size_t iy = 0; iy < ypts.Size(); iy++)
               fy(iy) += __Kernel(xpts[ix], ypts[iy]) * fx(ix);
         }
+      else if constexpr (std::is_same<KERNEL, class LaplaceDLKernel<3>>())
+        {
+          // This is really slow, but works:
+          for (size_t ix = 0; ix < xpts.Size(); ix++)
+            for (size_t iy = 0; iy < ypts.Size(); iy++)
+            {
+                double norm = L2Norm(xpts[ix]-ypts[iy]);
+                if (norm > 0)
+                  {
+                    double nxy = InnerProduct(ynv[iy], xpts[ix]-ypts[iy]);
+                    auto kern = nxy / (4 * M_PI * norm*norm*norm);
+                    fy(iy) += kern * fx(ix);
+                  }
+           }
+        }
+      // else if constexpr (std::is_same<KERNEL, class LaplaceHSKernel<3>>())
+      //   {
+      //     for (size_t ix = 0; ix < xpts.Size(); ix++)
+      //     for (size_t iy = 0; iy < ypts.Size(); iy++)
+      //     {
+      //         Vec<3> diff = xpts[ix]-ypts[iy];
+      //         double norm = L2Norm(diff);
+      //         if (norm > 0)
+      //         {
+      //             double normalprod = InnerProduct(xnv[ix], ynv[iy]);
+      //             double nx_xy = InnerProduct(xnv[ix], diff);
+      //             double ny_xy = InnerProduct(ynv[iy], diff);
+      //             double term1 = normalprod / std::pow(norm, 3);
+      //             double term2 = 3 * nx_xy * ny_xy / std::pow(norm, 5);
+      //             auto kern = (term1 - term2) / (4 * M_PI);
+      //             fy(iy) += kern * fx(ix);
+      //         }
+      //     }
+      //   }
       else if constexpr (std::is_same<KERNEL, class HelmholtzSLKernel<3>>())
         {
           for (size_t ix = 0; ix < xpts.Size(); ix++)
@@ -146,71 +243,85 @@ namespace ngbem
   template <>
   void FMM_Operator<HelmholtzSLKernel<3>> :: Mult(const BaseVector & x, BaseVector & y) const 
   {
-    static Timer tall("ngbem fmm apply CombinedField (ngfmm)"); RegionTimer reg(tall);
+    static Timer tall("ngbem fmm apply HelmholtzSL (ngfmm)"); RegionTimer reg(tall);
     auto fx = x.FV<Complex>();
     auto fy = y.FV<Complex>();
 
     fy = 0;
-    
+    if (L2Norm(x) == 0) return;
     double kappa = kernel.GetKappa();
-
-    
-    Vec<3> xmax(-1e99, -1e99, -1e99);
-    Vec<3> xmin(1e99, 1e99, 1e99);
-    for (auto xi : xpts)
-      {
-        for (int j = 0; j < 3; j++)
-          {
-            xmin(j) = min(xmin(j), xi(j));
-            xmax(j) = max(xmax(j), xi(j));
-          }
-      }
-
-    Vec<3> cx = 0.5*(xmin+xmax);
-    double rx = 0;
-    for (int j = 0; j < 3; j++)
-      rx = max(rx, xmax(j)-xmin(j));
-
-    Vec<3> ymax(-1e99, -1e99, -1e99);
-    Vec<3> ymin(1e99, 1e99, 1e99);
-    for (auto yi : ypts)
-      {
-        for (int j = 0; j < 3; j++)
-          {
-            ymin(j) = min(ymin(j), yi(j));
-            ymax(j) = max(ymax(j), yi(j));
-          }
-      }
-
-    Vec<3> cy = 0.5*(ymin+ymax);
-    double ry = 0;
-    for (int j = 0; j < 3; j++)
-      ry = max(ry, ymax(j)-ymin(j));
-
-
-    
-    auto singmp = make_shared<SingularMLMultiPole>(cx, rx, int(3*kappa*rx), kappa);
+    auto [cx, rx, cy, ry] = GetMidAndRadius(xpts, ypts);
+    auto singmp = make_shared<SingularMLMultiPole<Complex>>(cx, rx, int(3*kappa*rx), kappa);
 
     for (int i = 0; i < xpts.Size(); i++)
       singmp->AddCharge(xpts[i], fx(i));
-
     singmp->CalcMP();
-
-    /*
-    RegularMLMultiPole regmp (singmp, cy, ry, int(3*kappa*ry));
-    */
-    RegularMLMultiPole regmp (cy, ry, int(3*kappa*ry), kappa);
+    
+    RegularMLMultiPole<Complex> regmp (cy, ry, int(3*kappa*ry), kappa);
     for (int i = 0; i < ypts.Size(); i++)
       regmp.AddTarget(ypts[i]);
     regmp.CalcMP(singmp);
 
-    
     // for (int i = 0; i < ypts.Size(); i++)
     ParallelFor (ypts.Size(), [&](int i) {
       fy(i) = regmp.Evaluate(ypts[i]);
     });
   }
 
+  template <>
+  void FMM_Operator<HelmholtzDLKernel<3>> :: Mult(const BaseVector & x, BaseVector & y) const 
+  {
+    static Timer tall("ngbem fmm apply HelmholtzDL (ngfmm)"); RegionTimer reg(tall);
+    auto fx = x.FV<Complex>();
+    auto fy = y.FV<Complex>();
+
+    fy = 0;
+    if (L2Norm(x) == 0) return;
+    double kappa = kernel.GetKappa();
+    auto [cx, rx, cy, ry] = GetMidAndRadius(xpts, ypts);
+    auto singmp = make_shared<SingularMLMultiPole<Complex>>(cx, rx, int(3*kappa*rx), kappa);
+
+    for (int i = 0; i < xpts.Size(); i++)
+      singmp->AddDipole(xpts[i], -xnv[i], fx(i));
+    singmp->CalcMP();
+
+    RegularMLMultiPole<Complex> regmp (cy, ry, int(3*kappa*ry), kappa);
+    for (int i = 0; i < ypts.Size(); i++)
+      regmp.AddTarget(ypts[i]);
+    regmp.CalcMP(singmp);
+
+    // for (int i = 0; i < ypts.Size(); i++)
+    ParallelFor (ypts.Size(), [&](int i) {
+      fy(i) = regmp.Evaluate(ypts[i]);
+    });
+  }
+
+  template <>
+  void FMM_Operator<HelmholtzDLKernel<3>> :: MultTrans(const BaseVector & x, BaseVector & y) const 
+  {
+    static Timer tall("ngbem fmm apply HelmholtzDL MultTrans (ngfmm)"); RegionTimer reg(tall);
+    auto fx = x.FV<Complex>();
+    auto fy = y.FV<Complex>();
+
+    fy = 0;
+    if (L2Norm(x) == 0) return;
+    double kappa = kernel.GetKappa();
+    auto [cx, rx, cy, ry] = GetMidAndRadius(xpts, ypts);
+    auto singmp = make_shared<SingularMLMultiPole<Complex>>(cx, rx, int(3*kappa*rx), kappa);
+
+    for (int i = 0; i < xpts.Size(); i++)
+      singmp->AddCharge(xpts[i], fx(i));
+    singmp->CalcMP();
+
+    RegularMLMultiPole<Complex> regmp (cy, ry, int(3*kappa*ry), kappa);
+    for (int i = 0; i < ypts.Size(); i++)
+      regmp.AddTarget(ypts[i]);
+    regmp.CalcMP(singmp);
+
+    ParallelFor (ypts.Size(), [&](int i) {
+      fy(i) = regmp.EvaluateDirectionalDerivative(ypts[i], ynv[i]);
+    });
+  }
 
 
   
@@ -227,79 +338,39 @@ namespace ngbem
 
     fy = 0;
     if (L2Norm(x) == 0) return;
-    
-    t1.Start();
-    
-    Vec<3> xmax(-1e99, -1e99, -1e99);
-    Vec<3> xmin(1e99, 1e99, 1e99);
-    for (auto xi : xpts)
-      {
-        for (int j = 0; j < 3; j++)
-          {
-            xmin(j) = min(xmin(j), xi(j));
-            xmax(j) = max(xmax(j), xi(j));
-          }
-      }
-
     double kappa = kernel.GetKappa();
-    Vec<3> cx = 0.5*(xmin+xmax);
-    double rx = 0;
-    for (int j = 0; j < 3; j++)
-      rx = max(rx, xmax(j)-xmin(j));
-
-
-    Vec<3> ymax(-1e99, -1e99, -1e99);
-    Vec<3> ymin(1e99, 1e99, 1e99);
-    for (auto yi : ypts)
-      {
-        for (int j = 0; j < 3; j++)
-          {
-            ymin(j) = min(ymin(j), yi(j));
-            ymax(j) = max(ymax(j), yi(j));
-          }
-      }
-
-    Vec<3> cy = 0.5*(ymin+ymax);
-    double ry = 0;
-    for (int j = 0; j < 3; j++)
-      ry = max(ry, ymax(j)-ymin(j));
-
+    t1.Start();
+    auto [cx, rx, cy, ry] = GetMidAndRadius(xpts, ypts);
     t1.Stop();
     t2.Start();
     
-    auto singmp = make_shared<SingularMLMultiPole>(cx, rx, int(2*kappa*rx), kappa);
+    auto singmp = make_shared<SingularMLMultiPole<Complex>>(cx, rx, int(2*kappa*rx), kappa);
 
     for (int i = 0; i < xpts.Size(); i++)
       {
         singmp->AddCharge(xpts[i], Complex(0,-kappa)*fx(i));
-        singmp->AddDipole(xpts[i], -xnv[i], fx(i));        
+        singmp->AddDipole(xpts[i], -xnv[i], fx(i));
       }
     singmp->CalcMP();
-    cout << "sing norm = " << singmp->Norm() << endl;
+
     t2.Stop();
     t3.Start();
-    // RegularMLMultiPole regmp (singmp, cy, ry, int(2*kappa*ry));
-
-    RegularMLMultiPole regmp (cy, ry, int(3*kappa*ry), kappa);
+    RegularMLMultiPole<Complex> regmp (cy, ry, int(3*kappa*ry), kappa);
     for (int i = 0; i < ypts.Size(); i++)
       regmp.AddTarget(ypts[i]);
-
     regmp.CalcMP(singmp);
-    cout << "reg norm = " << regmp.Norm() << endl;
     t3.Stop();
     t4.Start();
-    // for (int i = 0; i < ypts.Size(); i++)
-    // fy(i) = regmp.Evaluate(ypts[i]);
-
     ParallelFor (ypts.Size(), [&](int i) {
       fy(i) = regmp.Evaluate(ypts[i]);
     });
     t4.Stop();
   }
-#endif 
-  
+
+#endif //end NGFMM
+
 #ifdef USE_FMM3D
-  
+
   // we can specialze the complete class ... 
   template <> 
   class FMM_Operator<LaplaceSLKernel<3>> : public Base_FMM_Operator<double>
@@ -517,6 +588,7 @@ namespace ngbem
       auto fy = y.FV<double>();
 
       // following: https://github.com/bempp/kifmm/blob/enh/c-abi/kifmm/c/main.c
+      bool timed = true;
       bool prune_empty = true;
       uint64_t n_crit = 150;
       uint64_t depth = 0;
@@ -528,19 +600,18 @@ namespace ngbem
 
       // Instantiate a Laplace evaluator
       struct FmmEvaluator *evaluator =
-        laplace_fft_f64_alloc(
+        laplace_fft_f64_alloc(timed,
                               expansion_order, nexpansion_order,
                               true,
-                              xpts[0].Data(), 3*xpts.Size(), 
+                              xpts[0].Data(), 3*xpts.Size(),
                               ypts[0].Data(), 3*ypts.Size(), 
                               fx.Data(), fx.Size(), 
                               prune_empty, n_crit, depth, block_size
                               );
-      
-      bool timed = true;
-      evaluate(evaluator, timed);
+
+      evaluate(evaluator);
       MortonKeys *leaves = leaves_target_tree(evaluator);
-      // cout << "num leaves = " << leaves->len << endl;      
+      // cout << "num leaves = " << leaves->len << endl;
       /*
       cout << "Number of leaf keys (n): %zu\n" << leaves->len << endl;
       for (uintptr_t i = 0; i < 5; ++i) {
@@ -599,4 +670,3 @@ namespace ngbem
 
 
 #endif
-
