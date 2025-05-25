@@ -40,3 +40,6 @@ CMakeFiles
 ng*.trace
 ng*.html
 __pycache__
+
+*DS_Store
+*.cache
